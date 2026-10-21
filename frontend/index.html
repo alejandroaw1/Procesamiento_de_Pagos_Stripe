@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Checkout - Demo Stripe</title>
+<script src="https://js.stripe.com/v3/"></script>
+<style>
+  :root {
+    --bg: #f5f6f8;
+    --card-bg: #ffffff;
+    --text: #1a1a2e;
+    --muted: #6b7280;
+    --accent: #6366f1;
+    --accent-hover: #4f46e5;
+    --border: #e5e7eb;
+    --error: #dc2626;
+    --success: #16a34a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    margin: 0;
+    padding: 40px 16px;
+    display: flex;
+    justify-content: center;
+  }
+  .card {
+    background: var(--card-bg);
+    border-radius: 12px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08), 0 4px 12px rgba(0,0,0,0.05);
+    padding: 32px;
+    width: 100%;
+    max-width: 420px;
+  }
+  h1 { font-size: 1.3rem; margin: 0 0 4px; }
+  .subtitle { color: var(--muted); font-size: 0.9rem; margin-bottom: 24px; }
+  .paso { display: none; }
+  .paso.activo { display: block; }
+  label {
+    display: block;
+    font-size: 0.85rem;
+    font-weight: 600;
+    margin-bottom: 6px;
+    margin-top: 16px;
+  }
+  input[type="text"], input[type="email"], select {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 0.95rem;
+    background: #fff;
+  }
+  input:focus, select:focus { outline: 2px solid var(--accent); border-color: transparent; }
+  #card-element {
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-top: 16px;
+    background: #fff;
+  }
+  button {
+    width: 100%;
+    margin-top: 24px;
+    padding: 12px;
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-size: 0.95rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  button:hover { background: var(--accent-hover); }
+  button:disabled { background: #a5a6f0; cursor: not-allowed; }
+  .resumen {
+    background: #f9fafb;
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-top: 16px;
+    font-size: 0.9rem;
+    display: flex;
+    justify-content: space-between;
+  }
+  #mensaje {
+    margin-top: 16px;
+    font-size: 0.9rem;
+    padding: 10px 12px;
+    border-radius: 8px;
+    display: none;
+  }
+  #mensaje.error { display: block; background: #fef2f2; color: var(--error); }
+  #mensaje.success { display: block; background: #f0fdf4; color: var(--success); }
+  .spinner {
+    display: none;
+    width: 16px; height: 16px;
+    border: 2px solid rgba(255,255,255,0.4);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: girar 0.6s linear infinite;
+    margin: 0 auto;
+  }
+  @keyframes girar { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<div class="card">
+  <h1>Completar compra</h1>
+  <p class="subtitle">Conectado a tu backend en <code id="api-base-label"></code></p>
+
+  <!-- Paso 1: datos del cliente -->
+  <div class="paso activo" id="paso-cliente">
+    <label for="nombre">Nombre completo</label>
+    <input type="text" id="nombre" placeholder="Nombre Completo">
+
+    <label for="email">Correo</label>
+    <input type="email" id="email" placeholder="correo@email.com">
+
+    <label for="producto">Producto</label>
+    <select id="producto"></select>
+
+    <button id="btn-continuar">Continuar</button>
+  </div>
+
+  <!-- Paso 2: pago -->
+  <div class="paso" id="paso-pago">
+    <div class="resumen" id="resumen-producto"></div>
+
+    <label>Datos de la tarjeta</label>
+    <div id="card-element"></div>
+
+    <button id="btn-pagar">
+      <span id="btn-pagar-texto">Pagar</span>
+      <div class="spinner" id="spinner"></div>
+    </button>
+    <button id="btn-otro-pago" style="display:none; background:#374151;">Realizar otra compra</button>
+  </div>
+
+  <div id="mensaje"></div>
+</div>
+
+<script>
+// -----------------------------------------------------------------
+
+const API_BASE = "http://localhost:3003";
+// -----------------------------------------------------------------
+
+document.getElementById("api-base-label").textContent = API_BASE;
+
+let stripe, elements, cardElement;
+let clienteId = null;
+let productoActual = null;
+let pagoCompletado = false;
+
+const $ = (id) => document.getElementById(id);
+
+function mostrarMensaje(texto, tipo) {
+  const el = $("mensaje");
+  el.textContent = texto;
+  el.className = tipo; // "error" | "success"
+}
+
+function limpiarMensaje() {
+  const el = $("mensaje");
+  el.className = "";
+  el.textContent = "";
+}
+
+async function llamarApi(path, options = {}) {
+  const res = await fetch(`${API_BASE}${path}`, {
+    headers: { "Content-Type": "application/json" },
+    ...options,
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.error || "Ocurrió un error inesperado");
+  }
+  return data;
+}
+
+async function iniciarStripe() {
+  const { publishableKey } = await llamarApi("/api/config");
+  if (!publishableKey) {
+    mostrarMensaje(
+      "Falta STRIPE_PUBLISHABLE_KEY en el .env del backend.",
+      "error"
+    );
+    return;
+  }
+  stripe = Stripe(publishableKey);
+  elements = stripe.elements();
+  cardElement = elements.create("card");
+  cardElement.mount("#card-element");
+}
+
+async function cargarProductos() {
+  const productos = await llamarApi("/api/productos");
+  const select = $("producto");
+  select.innerHTML = productos
+    .map((p) => `<option value="${p.id}">${p.nombre}</option>`)
+    .join("");
+}
+
+function reiniciarFormulario() {
+  pagoCompletado = false;
+  clienteId = null;
+  productoActual = null;
+  cardElement.clear();
+  $("nombre").value = "";
+  $("email").value = "";
+  limpiarMensaje();
+  $("btn-otro-pago").style.display = "none";
+  $("btn-pagar").style.display = "block";
+  $("btn-pagar-texto").textContent = "Pagar";
+  $("paso-pago").classList.remove("activo");
+  $("paso-cliente").classList.add("activo");
+}
+
+// Paso 1 → 2: crear cliente, traer el producto elegido y crear el PaymentIntent
+$("btn-continuar").addEventListener("click", async () => {
+  limpiarMensaje();
+  const nombre = $("nombre").value.trim();
+  const email = $("email").value.trim();
+  const productoId = $("producto").value;
+
+  if (!nombre || !email) {
+    mostrarMensaje("Completa nombre y correo.", "error");
+    return;
+  }
+  if (!productoId) {
+    mostrarMensaje("No hay productos disponibles para cobrar.", "error");
+    return;
+  }
+
+  $("btn-continuar").disabled = true;
+
+  try {
+    const cliente = await llamarApi("/api/usuarios", {
+      method: "POST",
+      body: JSON.stringify({ name: nombre, email }),
+    });
+    clienteId = cliente.id;
+
+    const precio = await llamarApi(`/api/productos/${productoId}/precio`);
+    const nombreProducto = $("producto").selectedOptions[0].textContent;
+    productoActual = { id: productoId, nombre: nombreProducto, ...precio };
+
+    $("resumen-producto").innerHTML =
+      `<span>${productoActual.nombre}</span>` +
+      `<strong>${(productoActual.amount / 100).toFixed(2)} ${productoActual.currency.toUpperCase()}</strong>`;
+
+    $("paso-cliente").classList.remove("activo");
+    $("paso-pago").classList.add("activo");
+  } catch (err) {
+    mostrarMensaje(err.message, "error");
+  } finally {
+    $("btn-continuar").disabled = false;
+  }
+});
+
+// Paso 2: confirmar el pago con Stripe Elements (la tarjeta nunca toca el backend)
+$("btn-pagar").addEventListener("click", async () => {
+  if (pagoCompletado) return; // evita cobrar dos veces con el mismo click
+
+  limpiarMensaje();
+  $("btn-pagar").disabled = true;
+  $("spinner").style.display = "block";
+  $("btn-pagar-texto").style.display = "none";
+
+  try {
+    const intento = await llamarApi("/api/pagos/intent", {
+      method: "POST",
+      body: JSON.stringify({
+        clientId: clienteId,
+        amount: productoActual.amount,
+        currency: productoActual.currency,
+        productId: productoActual.id,
+      }),
+    });
+
+    const resultado = await stripe.confirmCardPayment(intento.clientSecret, {
+      payment_method: {
+        card: cardElement,
+        billing_details: { name: $("nombre").value.trim() },
+      },
+    });
+
+    if (resultado.error) {
+      throw new Error(resultado.error.message);
+    }
+
+    if (resultado.paymentIntent.status === "succeeded") {
+      pagoCompletado = true;
+      mostrarMensaje("¡Pago realizado con éxito!", "success");
+      $("btn-pagar-texto").textContent = "Pagado ✓";
+      $("btn-pagar").style.display = "none";
+      $("btn-otro-pago").style.display = "block";
+      return; // no reactivar el botón de pago
+    }
+  } catch (err) {
+    mostrarMensaje(err.message, "error");
+  } finally {
+    $("spinner").style.display = "none";
+    $("btn-pagar-texto").style.display = "inline";
+    if (!pagoCompletado) $("btn-pagar").disabled = false;
+  }
+});
+
+$("btn-otro-pago").addEventListener("click", reiniciarFormulario);
+
+iniciarStripe();
+cargarProductos();
+</script>
+
+</body>
+</html>
